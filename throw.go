@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -29,15 +30,51 @@ var commandThrow = cli.Command{
 		cli.StringFlag{Name: "host, H", Value: "", Usage: "Post host metric values to <hostID>."},
 		cli.StringFlag{Name: "service, s", Value: "", Usage: "Post service metric values to <service>."},
 		cli.IntFlag{Name: "retry, r", Usage: "Retries up to N times when API request fails."},
+		cli.StringFlag{Name: "save-path, F", Value: "", Usage: "Filename to store metrics values while API request fails."},
 	},
+}
+
+func restoreMetricValues(filename string, metricValues *[]*(mkr.MetricValue)) {
+	f, err := os.Open(filename)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Log("warning", fmt.Sprintf("Failed to restore values: %s", err))
+		}
+		return
+	}
+	defer f.Close()
+	err = json.NewDecoder(f).Decode(metricValues)
+	if err != nil {
+		logger.Log("warning", fmt.Sprintf("Failed to restore values: %s", err))
+		return
+	}
+}
+
+func saveMetricValues(filename string, metricValues []*(mkr.MetricValue)) {
+	f, err := os.Create(filename)
+	if err != nil {
+		logger.Log("warning", fmt.Sprintf("Failed to save values: %s", err))
+		return
+	}
+	defer f.Close()
+	err = json.NewEncoder(f).Encode(metricValues)
+	if err != nil {
+		logger.Log("warning", fmt.Sprintf("Failed to save values: %s", err))
+		return
+	}
 }
 
 func doThrow(c *cli.Context) error {
 	optHostID := c.String("host")
 	optService := c.String("service")
 	optMaxRetry := c.Int("retry")
+	optSavePath := c.String("save-path")
 
 	var metricValues []*(mkr.MetricValue)
+
+	if optSavePath != "" {
+		restoreMetricValues(optSavePath, &metricValues)
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -78,18 +115,32 @@ func doThrow(c *cli.Context) error {
 	client := newMackerelFromContext(c)
 
 	if optHostID != "" {
-		logger.DieIf(requestWithRetry(func() error {
+		err := requestWithRetry(func() error {
 			return client.PostHostMetricValuesByHostID(optHostID, metricValues)
-		}, optMaxRetry))
+		}, optMaxRetry)
 
+		if optSavePath != "" {
+			if err == nil {
+				metricValues = [](*mkr.MetricValue){}
+			}
+			saveMetricValues(optSavePath, metricValues)
+		}
+		logger.DieIf(err)
 		for _, metric := range metricValues {
 			logger.Log("thrown", fmt.Sprintf("%s '%s\t%f\t%d'", optHostID, metric.Name, metric.Value, metric.Time))
 		}
 	} else if optService != "" {
-		logger.DieIf(requestWithRetry(func() error {
+		err := requestWithRetry(func() error {
 			return client.PostServiceMetricValues(optService, metricValues)
-		}, optMaxRetry))
+		}, optMaxRetry)
 
+		if optSavePath != "" {
+			if err == nil {
+				metricValues = [](*mkr.MetricValue){}
+			}
+			saveMetricValues(optSavePath, metricValues)
+		}
+		logger.DieIf(err)
 		for _, metric := range metricValues {
 			logger.Log("thrown", fmt.Sprintf("%s '%s\t%f\t%d'", optService, metric.Name, metric.Value, metric.Time))
 		}
